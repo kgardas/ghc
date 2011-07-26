@@ -874,9 +874,8 @@ foreignCall conv_string results_code expr_code args_code vols safety ret
                 code (emitForeignCall' PlayRisky results 
                    (CmmCallee expr' convention) args vols NoC_SRT ret)
               CmmSafe srt ->
-                code (emitForeignCall' (PlaySafe unused) results 
+                code (emitForeignCall' PlaySafe results 
                    (CmmCallee expr' convention) args vols NoC_SRT ret) where
-	        unused = panic "not used by emitForeignCall'"
               CmmInterruptible ->
                 code (emitForeignCall' PlayInterruptible results 
                    (CmmCallee expr' convention) args vols NoC_SRT ret)
@@ -911,9 +910,8 @@ primCall results_code name args_code vols safety
 		    code (emitForeignCall' PlayRisky results
 		      (CmmPrim p) args vols NoC_SRT CmmMayReturn)
 		  CmmSafe srt ->
-		    code (emitForeignCall' (PlaySafe unused) results 
+		    code (emitForeignCall' PlaySafe results 
 		      (CmmPrim p) args vols NoC_SRT CmmMayReturn) where
-		    unused = panic "not used by emitForeignCall'"
 		  CmmInterruptible ->
 		    code (emitForeignCall' PlayInterruptible results 
 		      (CmmPrim p) args vols NoC_SRT CmmMayReturn)
@@ -1077,7 +1075,7 @@ parseCmmFile dflags filename = do
         if (errorsFound dflags ms)
          then return (ms, Nothing)
          else do
-           dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" (ppr cmm)
+           dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" (pprPlatform (targetPlatform dflags) cmm)
            return (ms, Just cmm)
   where
 	no_module = panic "parseCmmFile: no module"

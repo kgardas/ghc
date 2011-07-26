@@ -888,6 +888,10 @@ install_packages: libffi/package.conf.install rts/package.conf.install
 	    $(call make-command,                                           \
 	           "$(INSTALLED_GHC_PKG_REAL)"                             \
 	               --global-conf "$(INSTALLED_PACKAGE_CONF)" hide $p))
+# when we install the packages above, ghc-pkg obeys umask when creating
+# package.cache, but for everything else we specify the permissions. We
+# therefore now fix the permissions of package.cache
+	$(CREATE_DATA) '$(INSTALLED_PACKAGE_CONF)/package.cache'
 
 # -----------------------------------------------------------------------------
 # Binary distributions
@@ -1074,7 +1078,7 @@ sdist-prep :
 	$(call sdist_file,compiler,stage2,parser,,Lexer,x)
 	$(call sdist_file,compiler,stage2,parser,,Parser,y.pp)
 	$(call sdist_file,compiler,stage2,parser,,ParserCore,y)
-	$(call sdist_file,utils/hpc,dist,,,HpcParser,y)
+	$(call sdist_file,utils/hpc,dist-install,,,HpcParser,y)
 	$(call sdist_file,utils/genprimopcode,dist,,,Lexer,x)
 	$(call sdist_file,utils/genprimopcode,dist,,,Parser,y)
 	$(call sdist_file,utils/haddock,dist,src,Haddock,Lex,x)

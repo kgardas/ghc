@@ -139,7 +139,7 @@ data NcgImpl statics instr jumpDest = NcgImpl {
     canShortcut               :: instr -> Maybe jumpDest,
     shortcutStatics           :: (BlockId -> Maybe jumpDest) -> statics -> statics,
     shortcutJump              :: (BlockId -> Maybe jumpDest) -> instr -> instr,
-    pprNatCmmTop              :: NatCmmTop statics instr -> Doc,
+    pprNatCmmTop              :: Platform -> NatCmmTop statics instr -> Doc,
     maxSpillSlots             :: Int,
     allocatableRegs           :: [RealReg],
     ncg_x86fp_kludge          :: [NatCmmTop statics instr] -> [NatCmmTop statics instr],
@@ -150,7 +150,7 @@ data NcgImpl statics instr jumpDest = NcgImpl {
 --------------------
 nativeCodeGen :: DynFlags -> Handle -> UniqSupply -> [RawCmm] -> IO ()
 nativeCodeGen dflags h us cmms
- = let nCG' :: (Outputable statics, Outputable instr, Instruction instr) => NcgImpl statics instr jumpDest -> IO ()
+ = let nCG' :: (Outputable statics, PlatformOutputable instr, Instruction instr) => NcgImpl statics instr jumpDest -> IO ()
        nCG' ncgImpl = nativeCodeGen' dflags ncgImpl h us cmms
        x86NcgImpl = NcgImpl {
                          cmmTopCodeGen             = X86.CodeGen.cmmTopCodeGen
@@ -206,13 +206,14 @@ nativeCodeGen dflags h us cmms
                  ArchUnknown ->
                      panic "nativeCodeGen: No NCG for unknown arch"
 
-nativeCodeGen' :: (Outputable statics, Outputable instr, Instruction instr)
+nativeCodeGen' :: (Outputable statics, PlatformOutputable instr, Instruction instr)
                => DynFlags
                -> NcgImpl statics instr jumpDest
                -> Handle -> UniqSupply -> [RawCmm] -> IO ()
 nativeCodeGen' dflags ncgImpl h us cmms
  = do
-	let split_cmms	= concat $ map add_split cmms
+	let platform = targetPlatform dflags
+	    split_cmms	= concat $ map add_split cmms
         -- BufHandle is a performance hack.  We could hide it inside
         -- Pretty if it weren't for the fact that we do lots of little
         -- printDocs here (in order to do codegen in constant space).
@@ -226,7 +227,7 @@ nativeCodeGen' dflags ncgImpl h us cmms
 	-- dump native code
 	dumpIfSet_dyn dflags
 		Opt_D_dump_asm "Asm code"
-		(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl) $ concat native)
+		(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl platform) $ concat native)
 
 	-- dump global NCG stats for graph coloring allocator
 	(case concat $ catMaybes colorStats of
@@ -244,10 +245,10 @@ nativeCodeGen' dflags ncgImpl h us cmms
 		dumpIfSet_dyn dflags
 			Opt_D_dump_asm_conflicts "Register conflict graph"
 			$ Color.dotGraph 
-				targetRegDotColor 
-				(Color.trivColorable 
-					targetVirtualRegSqueeze 
-					targetRealRegSqueeze)
+				(targetRegDotColor platform)
+				(Color.trivColorable platform
+					(targetVirtualRegSqueeze platform)
+					(targetRealRegSqueeze platform))
 			$ graphGlobal)
 
 
@@ -272,7 +273,7 @@ nativeCodeGen' dflags ncgImpl h us cmms
 
 -- | Do native code generation on all these cmms.
 --
-cmmNativeGens :: (Outputable statics, Outputable instr, Instruction instr)
+cmmNativeGens :: (Outputable statics, PlatformOutputable instr, Instruction instr)
               => DynFlags
               -> NcgImpl statics instr jumpDest
               -> BufHandle
@@ -297,7 +298,7 @@ cmmNativeGens dflags ncgImpl h us (cmm : cmms) impAcc profAcc count
 		<- cmmNativeGen dflags ncgImpl us cmm count
 
 	Pretty.bufLeftRender h
-		$ {-# SCC "pprNativeCode" #-} Pretty.vcat $ map (pprNatCmmTop ncgImpl) native
+		$ {-# SCC "pprNativeCode" #-} Pretty.vcat $ map (pprNatCmmTop ncgImpl (targetPlatform dflags)) native
 
            -- carefully evaluate this strictly.  Binding it with 'let'
            -- and then using 'seq' doesn't work, because the let
@@ -327,7 +328,7 @@ cmmNativeGens dflags ncgImpl h us (cmm : cmms) impAcc profAcc count
 --	Dumping the output of each stage along the way.
 --	Global conflict graph and NGC stats
 cmmNativeGen
-	:: (Outputable statics, Outputable instr, Instruction instr)
+	:: (Outputable statics, PlatformOutputable instr, Instruction instr)
     => DynFlags
     -> NcgImpl statics instr jumpDest
 	-> UniqSupply
@@ -341,6 +342,7 @@ cmmNativeGen
 
 cmmNativeGen dflags ncgImpl us cmm count
  = do
+        let platform = targetPlatform dflags
 
 	-- rewrite assignments to global regs
  	let fixed_cmm =
@@ -354,7 +356,7 @@ cmmNativeGen dflags ncgImpl us cmm count
 
 	dumpIfSet_dyn dflags
 		Opt_D_dump_opt_cmm "Optimised Cmm"
-		(pprCmm $ Cmm [opt_cmm])
+		(pprCmm platform $ Cmm [opt_cmm])
 
 	-- generate native code from cmm
 	let ((native, lastMinuteImports), usGen) =
@@ -363,18 +365,18 @@ cmmNativeGen dflags ncgImpl us cmm count
 
 	dumpIfSet_dyn dflags
 		Opt_D_dump_asm_native "Native code"
-		(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl) native)
+		(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl platform) native)
 
 	-- tag instructions with register liveness information
 	let (withLiveness, usLive) =
 		{-# SCC "regLiveness" #-}
 		initUs usGen 
-			$ mapUs regLiveness 
+			$ mapUs (regLiveness platform)
 			$ map natCmmTopToLive native
 
 	dumpIfSet_dyn dflags
 		Opt_D_dump_asm_liveness "Liveness annotations added"
-		(vcat $ map ppr withLiveness)
+		(vcat $ map (pprPlatform platform) withLiveness)
 		
 	-- allocate registers
 	(alloced, usAlloc, ppr_raStatsColor, ppr_raStatsLinear) <-
@@ -384,7 +386,7 @@ cmmNativeGen dflags ncgImpl us cmm count
 	  	-- the regs usable for allocation
 		let (alloc_regs :: UniqFM (UniqSet RealReg))
 			= foldr (\r -> plusUFM_C unionUniqSets
-					$ unitUFM (targetClassOfRealReg r) (unitUniqSet r))
+					$ unitUFM (targetClassOfRealReg platform r) (unitUniqSet r))
 				emptyUFM
 			$ allocatableRegs ncgImpl
 
@@ -401,14 +403,14 @@ cmmNativeGen dflags ncgImpl us cmm count
 		-- dump out what happened during register allocation
 		dumpIfSet_dyn dflags
 			Opt_D_dump_asm_regalloc "Registers allocated"
-			(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl) alloced)
+			(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl platform) alloced)
 
 		dumpIfSet_dyn dflags
 			Opt_D_dump_asm_regalloc_stages "Build/spill stages"
 			(vcat 	$ map (\(stage, stats)
 					-> text "# --------------------------"
 					$$ text "#  cmm " <> int count <> text " Stage " <> int stage
-					$$ ppr stats)
+					$$ pprPlatform platform stats)
 				$ zip [0..] regAllocStats)
 
 		let mPprStats =
@@ -432,7 +434,7 @@ cmmNativeGen dflags ncgImpl us cmm count
 
 		dumpIfSet_dyn dflags
 			Opt_D_dump_asm_regalloc "Registers allocated"
-			(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl) alloced)
+			(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl platform) alloced)
 
 		let mPprStats =
 			if dopt Opt_D_dump_asm_stats dflags
@@ -476,7 +478,7 @@ cmmNativeGen dflags ncgImpl us cmm count
 
 	dumpIfSet_dyn dflags
 		Opt_D_dump_asm_expanded "Synthetic instructions expanded"
-		(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl) expanded)
+		(vcat $ map (docToSDoc . pprNatCmmTop ncgImpl platform) expanded)
 
 	return 	( usAlloc
 		, expanded

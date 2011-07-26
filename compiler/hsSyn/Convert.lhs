@@ -336,6 +336,7 @@ cvtConstr (ForallC tvs ctxt con)
 cvt_arg :: (TH.Strict, TH.Type) -> CvtM (LHsType RdrName)
 cvt_arg (IsStrict, ty)  = do { ty' <- cvtType ty; returnL $ HsBangTy HsStrict ty' }
 cvt_arg (NotStrict, ty) = cvtType ty
+cvt_arg (Unpacked, ty)  = do { ty' <- cvtType ty; returnL $ HsBangTy HsUnpack ty' }
 
 cvt_id_arg :: (TH.Name, TH.Strict, TH.Type) -> CvtM (ConDeclField RdrName)
 cvt_id_arg (i, str, ty) 
@@ -374,8 +375,7 @@ cvtForD (ImportF callconv safety from nm ty)
   where
     safety' = case safety of
                      Unsafe     -> PlayRisky
-                     Safe       -> PlaySafe False
-                     Threadsafe -> PlaySafe True
+                     Safe       -> PlaySafe
                      Interruptible -> PlayInterruptible
 
 cvtForD (ExportF callconv as nm ty)
@@ -465,7 +465,6 @@ cvtl e = wrapL (cvt e)
 			    ; return $ HsLam (mkMatchGroup [mkSimpleMatch ps' e']) }
     cvt (TupE [e])     = cvt e	-- Singleton tuples treated like nothing (just parens)
     cvt (TupE es)      = do { es' <- mapM cvtl es; return $ ExplicitTuple (map Present es') Boxed }
-    cvt (UnboxedTupE [e])     = cvt e	-- Singleton tuples treated like nothing (just parens)
     cvt (UnboxedTupE es)      = do { es' <- mapM cvtl es; return $ ExplicitTuple (map Present es') Unboxed }
     cvt (CondE x y z)  = do { x' <- cvtl x; y' <- cvtl y; z' <- cvtl z;
 			    ; return $ HsIf (Just noSyntaxExpr) x' y' z' }
@@ -632,7 +631,6 @@ cvtp (TH.LitP l)
 cvtp (TH.VarP s)      = do { s' <- vName s; return $ Hs.VarPat s' }
 cvtp (TupP [p])       = cvtp p
 cvtp (TupP ps)        = do { ps' <- cvtPats ps; return $ TuplePat ps' Boxed void }
-cvtp (UnboxedTupP [p]) = cvtp p
 cvtp (UnboxedTupP ps)  = do { ps' <- cvtPats ps; return $ TuplePat ps' Unboxed void }
 cvtp (ConP s ps)      = do { s' <- cNameL s; ps' <- cvtPats ps; return $ ConPatIn s' (PrefixCon ps') }
 cvtp (InfixP p1 s p2) = do { s' <- cNameL s; p1' <- cvtPat p1; p2' <- cvtPat p2
@@ -710,8 +708,6 @@ cvtType ty
              -> if n==1 then return (head tys')	-- Singleton tuples treated
                                                 -- like nothing (ie just parens)
                         else returnL (HsTupleTy Unboxed tys')
-             | n == 1
-             -> failWith (ptext (sLit "Illegal 1-unboxed-tuple type constructor"))
              | otherwise
              -> mk_apps (HsTyVar (getRdrName (tupleTyCon Unboxed n))) tys'
            ArrowT 
