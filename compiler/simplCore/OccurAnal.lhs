@@ -35,7 +35,7 @@ import Digraph          ( SCC(..), stronglyConnCompFromEdgedVerticesR )
 import PrelNames        ( buildIdKey, foldrIdKey, runSTRepIdKey, augmentIdKey )
 import Unique
 import UniqFM
-import Util             ( mapAndUnzip, filterOut )
+import Util             ( mapAndUnzip, filterOut, fstOf3 )
 import Bag
 import Outputable
 import FastString
@@ -290,8 +290,9 @@ And indeed both can be inlined safely.
 Note again that the edges of the graph we use for computing loop breakers
 are not the same as the edges we use for computing the Rec blocks.
 That's why we compute
-    rec_edges          for the Rec block analysis
-    loop_breaker_edges for the loop breaker analysis
+
+- rec_edges          for the Rec block analysis
+- loop_breaker_edges for the loop breaker analysis
 
   * Note [Finding rule RHS free vars]
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -307,12 +308,8 @@ That's why we compute
     the RULE is only active *before* phase 1.  So there's no problem.
 
     To make this work, we look for the RHS free vars only for
-    *active* rules. More precisely, in the rules that are active now
-    or might *become* active in a later phase.  We need the latter
-    because (curently) we don't 
-
-    That's the reason for the is_active argument
-    to idRhsRuleVars, and the occ_rule_act field of the OccEnv.
+    *active* rules. That's the reason for the occ_rule_act field 
+    of the OccEnv.
  
   * Note [Weak loop breakers]
     ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -334,10 +331,28 @@ That's why we compute
     not choosen as a loop breaker.)  Why not?  Because then we
     drop the binding for 'g', which leaves it out of scope in the
     RULE!
+  
+    Here's a somewhat different example of the same thing
+        Rec { g = h
+            ; h = ...f...
+            ; f = f_rhs
+              RULE f [] = g }
+    Here the RULE is "below" g, but we *still* can't postInlineUnconditionally
+    g, because the RULE for f is active throughout.  So the RHS of h
+    might rewrite to 	 h = ...g...
+    So g must remain in scope in the output program!
+    
+    We "solve" this by:
 
-    We "solve" this by making g a "weak" or "rules-only" loop breaker,
-    with OccInfo = IAmLoopBreaker True.  A normal "strong" loop breaker
-    has IAmLoopBreaker False.  So
+        Make g a "weak" loop breaker (OccInfo = IAmLoopBreaker True)
+        iff g is a "missing free variable" of the Rec group
+
+    A "missing free variable" x is one that is mentioned in an RHS or
+    INLINE or RULE of a binding in the Rec group, but where the
+    dependency on x may not show up in the loop_breaker_edges (see
+    note [Choosing loop breakers} above).
+
+    A normal "strong" loop breaker has IAmLoopBreaker False.  So
 
                                 Inline  postInlineUnconditionally
         IAmLoopBreaker False    no      no
@@ -345,7 +360,9 @@ That's why we compute
         other                   yes     yes
 
     The **sole** reason for this kind of loop breaker is so that
-    postInlineUnconditionally does not fire.  Ugh.
+    postInlineUnconditionally does not fire.  Ugh.  (Typically it'll
+    inline via the usual callSiteInline stuff, so it'll be dead in the
+    next pass, so the main Ugh is the tiresome complication.)
 
 Note [Rules for imported functions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -523,30 +540,43 @@ data Details
                                 -- but excluding any RULES
                                 -- This is the IdSet that may be used if the Id is inlined
 
-       , nd_rule_fvs :: IdSet   -- Free variables of the RHS of active RULES
-
-       -- In the last two fields, we haev already expanded occurrences
-       -- of imported Ids for which we have local RULES, to their local-id sets
+       , nd_weak :: IdSet       -- Binders of this Rec that are mentioned in nd_uds
+       	 	       		-- but are *not* in nd_inl.  These are the ones whose
+				-- dependencies might not be respected by loop_breaker_edges
+				-- See Note [Weak loop breakers]
+  
+       , nd_active_rule_fvs :: IdSet   -- Free variables of the RHS of active RULES
   }
+
+instance Outputable Details where
+   ppr nd = ptext (sLit "ND") <> braces 
+             (sep [ ptext (sLit "bndr =") <+> ppr (nd_bndr nd)
+                  , ptext (sLit "uds =") <+> ppr (nd_uds nd)
+                  , ptext (sLit "inl =") <+> ppr (nd_inl nd)
+                  , ptext (sLit "weak =") <+> ppr (nd_weak nd)
+                  , ptext (sLit "rule =") <+> ppr (nd_active_rule_fvs nd)
+	     ])
 
 makeNode :: OccEnv -> VarSet -> (Var, CoreExpr) -> Node Details
 makeNode env bndr_set (bndr, rhs)
-  = (details, varUnique bndr, keysUFM (udFreeVars bndr_set rhs_usage4))
+  = (details, varUnique bndr, keysUFM node_fvs)
   where
     details = ND { nd_bndr = bndr
                  , nd_rhs  = rhs'
-                 , nd_uds  = rhs_usage4
+                 , nd_uds  = rhs_usage3
+		 , nd_weak = node_fvs `minusVarSet` inl_fvs
                  , nd_inl  = inl_fvs
-                 , nd_rule_fvs = active_rule_fvs }
+                 , nd_active_rule_fvs = active_rule_fvs }
 
     -- Constructing the edges for the main Rec computation
     -- See Note [Forming Rec groups]
     (rhs_usage1, rhs') = occAnalRhs env Nothing rhs
-    rhs_usage2 = addIdOccs rhs_usage1 rule_rhs_fvs   -- Note [Rules are extra RHSs]
-    rhs_usage3 = addIdOccs rhs_usage2 rule_lhs_fvs   -- Note [Rule dependency info]
-    rhs_usage4 = case mb_unf_fvs of
-                   Just unf_fvs -> addIdOccs rhs_usage3 unf_fvs
-                   Nothing      -> rhs_usage3
+    rhs_usage2 = addIdOccs rhs_usage1 all_rule_fvs   -- Note [Rules are extra RHSs]
+                                                     -- Note [Rule dependency info]
+    rhs_usage3 = case mb_unf_fvs of
+                   Just unf_fvs -> addIdOccs rhs_usage2 unf_fvs
+                   Nothing      -> rhs_usage2
+    node_fvs = udFreeVars bndr_set rhs_usage3
 
     -- Finding the free variables of the rules
     is_active = occ_rule_act env :: Activation -> Bool
@@ -557,7 +587,7 @@ makeNode env bndr_set (bndr, rhs)
                   , let fvs = exprFreeVars (ru_rhs rule)
 		    	      `delVarSetList` ru_bndrs rule
                   , not (isEmptyVarSet fvs) ]
-    rule_rhs_fvs = foldr (unionVarSet . snd) emptyVarSet rules_w_fvs
+    all_rule_fvs = foldr (unionVarSet . snd) rule_lhs_fvs rules_w_fvs
     rule_lhs_fvs = foldr (unionVarSet . (\ru -> exprsFreeVars (ru_args ru)
                                                 `delVarSetList` ru_bndrs ru))
                          emptyVarSet rules
@@ -600,7 +630,10 @@ occAnalRec (CyclicSCC nodes) (body_uds, binds)
   = (body_uds, binds)				-- Dead code
 
   | otherwise	-- At this point we always build a single Rec
-  = (final_uds, Rec pairs : binds)
+  = -- pprTrace "occAnalRec" (vcat
+    --   [ text "tagged nodes" <+> ppr tagged_nodes
+    --   , text "lb edges" <+> ppr loop_breaker_edges])
+    (final_uds, Rec pairs : binds)
 
   where
     bndrs    = [b | (ND { nd_bndr = b }, _, _) <- nodes]
@@ -620,11 +653,14 @@ occAnalRec (CyclicSCC nodes) (body_uds, binds)
     ---------------------------
     -- Now reconstruct the cycle
     pairs :: [(Id,CoreExpr)]
-    pairs | any non_boring bndrs = loopBreakNodes 0 bndr_set emptyVarSet loop_breaker_edges []
-          | otherwise            = reOrderNodes   0 bndr_set emptyVarSet tagged_nodes       []
-    non_boring bndr = isId bndr &&
-                      (isStableUnfolding (realIdUnfolding bndr) || idHasRules bndr)
-		      -- If all are boring, the loop_breaker_edges will be a single Cyclic SCC
+    pairs | isEmptyVarSet weak_fvs = reOrderNodes   0 bndr_set weak_fvs tagged_nodes       []
+          | otherwise              = loopBreakNodes 0 bndr_set weak_fvs loop_breaker_edges []
+	  -- If weak_fvs is empty, the loop_breaker_edges will include all 
+	  -- the edges in tagged_nodes, so there isn't any point in doing 
+	  -- a fresh SCC computation that will yield a single CyclicSCC result.
+
+    weak_fvs :: VarSet
+    weak_fvs = foldr (unionVarSet . nd_weak . fstOf3) emptyVarSet nodes
 
 	-- See Note [Choosing loop breakers] for loop_breaker_edges
     loop_breaker_edges = map mk_node tagged_nodes
@@ -632,12 +668,14 @@ occAnalRec (CyclicSCC nodes) (body_uds, binds)
       = (details, k, keysUFM (extendFvs_ rule_fv_env inl_fvs))
 
     ------------------------------------
-    rule_fv_env :: IdEnv IdSet  -- Variables from this group mentioned in RHS of active rules
-                                -- Domain is *subset* of bound vars (others have no rule fvs)
+    rule_fv_env :: IdEnv IdSet  
+        -- Maps a variable f to the variables from this group 
+        --      mentioned in RHS of active rules for f
+        -- Domain is *subset* of bound vars (others have no rule fvs)
     rule_fv_env = transClosureFV (mkVarEnv init_rule_fvs)
     init_rule_fvs   -- See Note [Finding rule RHS free vars]
       = [ (b, trimmed_rule_fvs)
-        | (ND { nd_bndr = b, nd_rule_fvs = rule_fvs },_,_) <- nodes
+        | (ND { nd_bndr = b, nd_active_rule_fvs = rule_fvs },_,_) <- nodes
         , let trimmed_rule_fvs = rule_fvs `intersectVarSet` bndr_set
         , not (isEmptyVarSet trimmed_rule_fvs)]
 \end{code}
@@ -666,46 +704,42 @@ mk_loop_breaker (ND { nd_bndr = bndr, nd_rhs = rhs}, _, _)
 
 mk_non_loop_breaker :: VarSet -> Node Details -> Binding
 -- See Note [Weak loop breakers]
-mk_non_loop_breaker used_earlier (ND { nd_bndr = bndr, nd_rhs = rhs}, _, _) 
-  | bndr `elemVarSet` used_earlier = (setIdOccInfo bndr weakLoopBreaker, rhs)
-  | otherwise                      = (bndr, rhs)
+mk_non_loop_breaker used_in_rules (ND { nd_bndr = bndr, nd_rhs = rhs}, _, _) 
+  | bndr `elemVarSet` used_in_rules = (setIdOccInfo bndr weakLoopBreaker, rhs)
+  | otherwise                       = (bndr, rhs)
 
 udFreeVars :: VarSet -> UsageDetails -> VarSet
 -- Find the subset of bndrs that are mentioned in uds
 udFreeVars bndrs uds = intersectUFM_C (\b _ -> b) bndrs uds
 
 loopBreakNodes :: Int 
-	       -> VarSet -> VarSet	-- All binders and binders used earlier
+	       -> VarSet	-- All binders
+               -> VarSet	-- Binders whose dependencies may be "missing"
+	       	  		-- See Note [Weak loop breakers]
                -> [Node Details]
                -> [Binding]	        -- Append these to the end
                -> [Binding]
 -- Return the bindings sorted into a plausible order, and marked with loop breakers.  
-loopBreakNodes depth bndr_set used_earlier nodes binds
-  = go used_earlier (stronglyConnCompFromEdgedVerticesR nodes) binds
+loopBreakNodes depth bndr_set weak_fvs nodes binds
+  = go (stronglyConnCompFromEdgedVerticesR nodes) binds
   where
-    go _            []         binds = binds
-    go used_earlier (scc:sccs) binds = loop_break_scc used_earlier scc $
-                                       go (used_earlier `unionVarSet` scc_uses scc) sccs binds
+    go []         binds = binds
+    go (scc:sccs) binds = loop_break_scc scc (go sccs binds)
 
-    scc_uses :: SCC (Node Details) -> VarSet
-    scc_uses (AcyclicSCC node) = node_uses node
-    scc_uses (CyclicSCC nodes) = foldr (unionVarSet . node_uses) emptyVarSet nodes
-
-    node_uses :: Node Details -> VarSet
-    node_uses (nd,_,_) = udFreeVars bndr_set (nd_uds nd) 
-
-    loop_break_scc used_earlier scc binds
+    loop_break_scc scc binds
       = case scc of
-          AcyclicSCC node  -> mk_non_loop_breaker used_earlier node : binds
+          AcyclicSCC node  -> mk_non_loop_breaker weak_fvs node : binds
           CyclicSCC [node] -> mk_loop_breaker node : binds
-          CyclicSCC nodes  -> reOrderNodes depth bndr_set used_earlier nodes binds
+          CyclicSCC nodes  -> reOrderNodes depth bndr_set weak_fvs nodes binds
 
 reOrderNodes :: Int -> VarSet -> VarSet -> [Node Details] -> [Binding] -> [Binding]
     -- Choose a loop breaker, mark it no-inline,
     -- do SCC analysis on the rest, and recursively sort them out
 reOrderNodes _ _ _ [] _  = panic "reOrderNodes"
-reOrderNodes depth bndr_set used_earlier (node : nodes) binds
-  = loopBreakNodes new_depth bndr_set used_earlier unchosen $
+reOrderNodes depth bndr_set weak_fvs (node : nodes) binds
+  = -- pprTrace "reOrderNodes" (text "unchosen" <+> ppr unchosen $$ 
+    --                           text "chosen" <+> ppr chosen_nodes) $
+    loopBreakNodes new_depth bndr_set weak_fvs unchosen $
     (map mk_loop_breaker chosen_nodes ++ binds)
   where
     (chosen_nodes, unchosen) = choose_loop_breaker (score node) [node] [] nodes

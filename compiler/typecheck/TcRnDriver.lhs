@@ -9,7 +9,7 @@ module TcRnDriver (
 #ifdef GHCI
 	tcRnStmt, tcRnExpr, tcRnType,
 	tcRnLookupRdrName,
-	getModuleExports,
+	getModuleInterface,
 #endif
 	tcRnImports,
 	tcRnLookupName,
@@ -37,6 +37,7 @@ import InstEnv
 import FamInstEnv
 import TcAnnotations
 import TcBinds
+import HeaderInfo       ( mkPrelImports )
 import TcType	( tidyTopType )
 import TcDefaults
 import TcEnv
@@ -83,7 +84,6 @@ import TcHsType
 import TcMatches
 import RnTypes
 import RnExpr
-import IfaceEnv
 import MkId
 import BasicTypes
 import TidyPgm	  ( globaliseAndTidyId )
@@ -121,15 +121,25 @@ tcRnModule hsc_env hsc_src save_rn_syntax
  = do { showPass (hsc_dflags hsc_env) "Renamer/typechecker" ;
 
    let { this_pkg = thisPackage (hsc_dflags hsc_env) ;
-	 this_mod = case maybe_mod of
-			Nothing  -> mAIN	-- 'module M where' is omitted
-			Just (L _ mod) -> mkModule this_pkg mod } ;
-						-- The normal case
+	 (this_mod, prel_imp_loc) 
+            = case maybe_mod of
+		Nothing -- 'module M where' is omitted  
+                    ->  (mAIN, srcLocSpan (srcSpanStart loc))	
+			    	   
+		Just (L mod_loc mod)  -- The normal case
+                    -> (mkModule this_pkg mod, mod_loc) } ;
 		
    initTc hsc_env hsc_src save_rn_syntax this_mod $ 
    setSrcSpan loc $
-   do {		-- Deal with imports;
-	tcg_env <- tcRnImports hsc_env this_mod import_decls ;
+   do {		-- Deal with imports; first add implicit prelude
+        implicit_prelude <- xoptM Opt_ImplicitPrelude;
+        let { prel_imports = mkPrelImports (moduleName this_mod) prel_imp_loc
+                                         implicit_prelude import_decls } ;
+
+        ifWOptM Opt_WarnImplicitPrelude $
+             when (notNull prel_imports) $ addWarn (implicitPreludeWarn) ;
+
+	tcg_env <- tcRnImports hsc_env this_mod (prel_imports ++ import_decls) ;
 	setGblEnv tcg_env		$ do {
 
 		-- Load the hi-boot interface for this module, if any
@@ -189,6 +199,11 @@ tcRnModule hsc_env hsc_src save_rn_syntax
 	tcDump tcg_env ;
 	return tcg_env
     }}}}
+
+
+implicitPreludeWarn :: SDoc
+implicitPreludeWarn
+  = ptext (sLit "Module `Prelude' implicitly imported")
 \end{code}
 
 
@@ -199,7 +214,8 @@ tcRnModule hsc_env hsc_src save_rn_syntax
 %************************************************************************
 
 \begin{code}
-tcRnImports :: HscEnv -> Module -> [LImportDecl RdrName] -> TcM TcGblEnv
+tcRnImports :: HscEnv -> Module 
+            -> [LImportDecl RdrName] -> TcM TcGblEnv
 tcRnImports hsc_env this_mod import_decls
   = do	{ (rn_imports, rdr_env, imports,hpc_info) <- rnImports import_decls ;
 
@@ -252,7 +268,8 @@ tcRnImports hsc_env this_mod import_decls
 		-- Load any orphan-module and family instance-module
 		-- interfaces, so that their rules and instance decls will be
 		-- found.
-	; loadOrphanModules (imp_orphs  imports) False
+	; loadModuleInterfaces (ptext (sLit "Loading orphan modules")) 
+                               (imp_orphs imports)
 
                 -- Check type-family consistency
 	; traceRn (text "rn1: checking family instance consistency")
@@ -1374,25 +1391,10 @@ tcRnType hsc_env ictxt rdr_type
 -- a package module with an interface on disk.  If neither of these is
 -- true, then the result will be an error indicating the interface
 -- could not be found.
-getModuleExports :: HscEnv -> Module -> IO (Messages, Maybe [AvailInfo])
-getModuleExports hsc_env mod
-  = initTc hsc_env HsSrcFile False iNTERACTIVE (tcGetModuleExports mod)
-
--- Get the export avail info and also load all orphan and family-instance
--- modules.  Finally, check that the family instances of all modules in the
--- interactive context are consistent (these modules are in the second
--- argument).
-tcGetModuleExports :: Module -> TcM [AvailInfo]
-tcGetModuleExports mod
-  = do { let doc = ptext (sLit "context for compiling statements")
-       ; iface <- initIfaceTcRn $ loadSysInterface doc mod
-
-  		-- Load any orphan-module and family instance-module
-  		-- interfaces, so their instances are visible.
-       ; loadOrphanModules (dep_orphs (mi_deps iface)) False 
-
-       ; ifaceExportNames (mi_exports iface)
-       }
+getModuleInterface :: HscEnv -> Module -> IO (Messages, Maybe ModIface)
+getModuleInterface hsc_env mod
+  = initTc hsc_env HsSrcFile False iNTERACTIVE $
+    loadModuleInterface (ptext (sLit "getModuleInterface")) mod
 
 tcRnLookupRdrName :: HscEnv -> RdrName -> IO (Messages, Maybe [Name])
 tcRnLookupRdrName hsc_env rdr_name 

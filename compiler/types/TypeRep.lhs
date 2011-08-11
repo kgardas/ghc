@@ -155,11 +155,11 @@ data Type
 
   | PredTy
 	PredType	-- ^ The type of evidence for a type predictate.
-                        -- Note that a @PredTy (EqPred _ _)@ can appear only as the kind
-                        -- of a coercion variable; never as the argument or result of a
-                        -- 'FunTy' (unlike the 'PredType' constructors 'ClassP' or 'IParam')
-	                
-	                -- See Note [PredTy], and Note [Equality predicates]
+	                -- See Note [PredTy]
+			-- By the time we are in Core-land, PredTys are
+			-- synonymous with their representation
+			-- (see Type.predTypeRep)
+
   deriving (Data.Data, Data.Typeable)
 
 -- | The key type representing kinds in the compiler.
@@ -230,24 +230,6 @@ represented using
 The predicate really does turn into a real extra argument to the
 function.  If the argument has type (PredTy p) then the predicate p is
 represented by evidence (a dictionary, for example, of type (predRepTy p).
-
-Note [Equality predicates]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-	forall a b. (a ~ S b) => a -> b
-could be represented by
-	ForAllTy a (ForAllTy b (FunTy (PredTy (EqPred a (S b))) ...))
-OR
-	ForAllTy a (ForAllTy b (ForAllTy (c::PredTy (EqPred a (S b))) ...))
-
-The latter is what we do.  (Unlike for class and implicit parameter
-constraints, which do use FunTy.)
-
-Reason:
-	* FunTy is always a *value* function
-	* ForAllTy is discarded at runtime
-
-We often need to make a "wildcard" (c::PredTy..).  We always use the same
-name (wildCoVarName), since it's not mentioned.
 
 
 %************************************************************************
@@ -529,9 +511,30 @@ pprThetaArrow :: (Prec -> a -> SDoc) -> [Pred a] -> SDoc
 pprThetaArrow _ []      = empty
 pprThetaArrow pp [pred]
       | noParenPred pred = pprPred pp pred <+> darrow
-pprThetaArrow pp preds   = parens (sep (punctuate comma (map (pprPred pp) preds)))
+pprThetaArrow pp preds   = parens (fsep (punctuate comma (map (pprPred pp) preds)))
                             <+> darrow
-
+    -- Notice 'fsep' here rather that 'sep', so that
+    -- type contexts don't get displayed in a giant column
+    -- Rather than
+    --  instance (Eq a,
+    --            Eq b,
+    --            Eq c,
+    --            Eq d,
+    --            Eq e,
+    --            Eq f,
+    --            Eq g,
+    --            Eq h,
+    --            Eq i,
+    --            Eq j,
+    --            Eq k,
+    --            Eq l) =>
+    --           Eq (a, b, c, d, e, f, g, h, i, j, k, l)
+    -- we get
+    --
+    --  instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i,
+    --            Eq j, Eq k, Eq l) =>
+    --           Eq (a, b, c, d, e, f, g, h, i, j, k, l)
+			   
 noParenPred :: Pred a -> Bool
 -- A predicate that can appear without parens before a "=>"
 --       C a => a -> a
@@ -594,8 +597,7 @@ ppr_forall_type p ty
 
 ppr_tvar :: TyVar -> SDoc
 ppr_tvar tv  -- Note [Infix type variables]
-  | isSymOcc (getOccName tv)  = parens (ppr tv)
-  | otherwise		      = ppr tv
+  = parenSymOcc (getOccName tv) (ppr tv)
 
 -------------------
 pprForAll :: [TyVar] -> SDoc

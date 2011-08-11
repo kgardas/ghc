@@ -259,6 +259,7 @@ Library
         CorePrep
         CoreSubst
         CoreSyn
+        TrieMap
         CoreTidy
         CoreUnfold
         CoreUtils
@@ -563,4 +564,4 @@ Library
             Linker
             ObjLink
             RtClosureInspect
-
+            DebuggerUtils

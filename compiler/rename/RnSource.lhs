@@ -30,7 +30,7 @@ import RnEnv		( lookupLocalDataTcNames, lookupLocatedOccRn,
 			  bindLocalNames, checkDupRdrNames, mapFvRn
 			)
 import RnNames       	( getLocalNonValBinders, extendGlobalRdrEnvRn )
-import HscTypes      	( GenAvailInfo(..), availsToNameSet )
+import HscTypes      	( AvailInfo(..), availsToNameSet )
 import RnHsDoc          ( rnHsDoc, rnMbLHsDoc )
 import TcRnMonad
 
@@ -133,6 +133,7 @@ rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
          val_avails = map Avail val_binders 
        } ;
    (tcg_env, tcl_env) <- extendGlobalRdrEnvRn val_avails local_fix_env ;
+   traceRn (ptext (sLit "Val binders") <+> (ppr val_binders)) ;
    setEnvs (tcg_env, tcl_env) $ do {
 
    --  Now everything is in scope, as the remaining renaming assumes.
@@ -455,7 +456,7 @@ rnSrcInstDecl (InstDecl inst_ty mbinds uprags ats)
 	-- The typechecker (not the renamer) checks that all 
 	-- the declarations are for the right class
     let
-	at_names = map (head . hsTyClDeclBinders) ats
+	at_names = map (tcdLName . unLoc) ats	-- The names of the associated types
     in
     checkDupRdrNames at_names		`thenM_`
 	-- See notes with checkDupRdrNames for methods, above

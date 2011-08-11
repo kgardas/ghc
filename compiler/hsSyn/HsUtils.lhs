@@ -22,6 +22,7 @@ module HsUtils(
   mkHsWrap, mkLHsWrap, mkHsWrapCo, mkLHsWrapCo,
   coToHsWrapper, mkHsDictLet, mkHsLams,
   mkHsOpApp, mkHsDo, mkHsComp, mkHsWrapPat, mkHsWrapPatCo,
+  mkLHsPar, 
 
   nlHsTyApp, nlHsVar, nlHsLit, nlHsApp, nlHsApps, nlHsIntLit, nlHsVarApps, 
   nlHsDo, nlHsOpApp, nlHsLam, nlHsPar, nlHsIf, nlHsCase, nlList,
@@ -35,7 +36,7 @@ module HsUtils(
 
   -- Patterns
   mkNPat, mkNPlusKPat, nlVarPat, nlLitPat, nlConVarPat, nlConPat, nlInfixConPat,
-  nlNullaryConPat, nlWildConPat, nlWildPat, nlTuplePat, 
+  nlNullaryConPat, nlWildConPat, nlWildPat, nlTuplePat, mkParPat,
 
   -- Types
   mkHsAppTy, userHsTyVarBndrs,
@@ -88,6 +89,7 @@ import Util
 import Bag
 
 import Data.Either
+import Data.Maybe
 \end{code}
 
 
@@ -120,15 +122,50 @@ unguardedGRHSs rhs = GRHSs (unguardedRHS rhs) emptyLocalBinds
 unguardedRHS :: LHsExpr id -> [LGRHS id]
 unguardedRHS rhs@(L loc _) = [L loc (GRHS [] rhs)]
 
+mkMatchGroup :: [LMatch id] -> MatchGroup id
+mkMatchGroup matches = MatchGroup matches placeHolderType
+
 mkHsAppTy :: LHsType name -> LHsType name -> LHsType name
 mkHsAppTy t1 t2 = addCLoc t1 t2 (HsAppTy t1 t2)
 
 mkHsApp :: LHsExpr name -> LHsExpr name -> LHsExpr name
 mkHsApp e1 e2 = addCLoc e1 e2 (HsApp e1 e2)
 
+mkHsLam :: [LPat id] -> LHsExpr id -> LHsExpr id
+mkHsLam pats body = mkHsPar (L (getLoc body) (HsLam matches))
+	where
+	  matches = mkMatchGroup [mkSimpleMatch pats body]
+
+mkHsLams :: [TyVar] -> [EvVar] -> LHsExpr Id -> LHsExpr Id
+mkHsLams tyvars dicts expr = mkLHsWrap (mkWpTyLams tyvars <.> mkWpLams dicts) expr
+
+mkHsConApp :: DataCon -> [Type] -> [HsExpr Id] -> LHsExpr Id
+-- Used for constructing dictionary terms etc, so no locations 
+mkHsConApp data_con tys args 
+  = foldl mk_app (nlHsTyApp (dataConWrapId data_con) tys) args
+  where
+    mk_app f a = noLoc (HsApp f (noLoc a))
+
+mkSimpleHsAlt :: LPat id -> LHsExpr id -> LMatch id
+-- A simple lambda with a single pattern, no binds, no guards; pre-typechecking
+mkSimpleHsAlt pat expr 
+  = mkSimpleMatch [pat] expr
+
 nlHsTyApp :: name -> [Type] -> LHsExpr name
 nlHsTyApp fun_id tys = noLoc (HsWrap (mkWpTyApps tys) (HsVar fun_id))
 
+--------- Adding parens ---------
+mkLHsPar :: LHsExpr name -> LHsExpr name
+-- Wrap in parens if hsExprNeedsParens says it needs them
+-- So   'f x'  becomes '(f x)', but '3' stays as '3'
+mkLHsPar le@(L loc e) | hsExprNeedsParens e = L loc (HsPar le)
+                      | otherwise           = le
+
+mkParPat :: LPat name -> LPat name
+mkParPat lp@(L loc p) | hsPatNeedsParens p = L loc (ParPat lp)
+                      | otherwise          = lp
+
+--------- HsWrappers: type args, dict args, casts ---------
 mkLHsWrap :: HsWrapper -> LHsExpr id -> LHsExpr id
 mkLHsWrap co_fn (L loc e) = L loc (mkHsWrap co_fn e)
 
@@ -156,31 +193,9 @@ mkHsWrapPatCo :: Coercion -> Pat id -> Type -> Pat id
 mkHsWrapPatCo (Refl _) pat _  = pat
 mkHsWrapPatCo co       pat ty = CoPat (WpCast co) pat ty
 
-mkHsLam :: [LPat id] -> LHsExpr id -> LHsExpr id
-mkHsLam pats body = mkHsPar (L (getLoc body) (HsLam matches))
-	where
-	  matches = mkMatchGroup [mkSimpleMatch pats body]
-
-mkMatchGroup :: [LMatch id] -> MatchGroup id
-mkMatchGroup matches = MatchGroup matches placeHolderType
-
-mkHsLams :: [TyVar] -> [EvVar] -> LHsExpr Id -> LHsExpr Id
-mkHsLams tyvars dicts expr = mkLHsWrap (mkWpTyLams tyvars <.> mkWpLams dicts) expr
-
 mkHsDictLet :: TcEvBinds -> LHsExpr Id -> LHsExpr Id
 mkHsDictLet ev_binds expr = mkLHsWrap (mkWpLet ev_binds) expr
 
-mkHsConApp :: DataCon -> [Type] -> [HsExpr Id] -> LHsExpr Id
--- Used for constructing dictionary terms etc, so no locations 
-mkHsConApp data_con tys args 
-  = foldl mk_app (nlHsTyApp (dataConWrapId data_con) tys) args
-  where
-    mk_app f a = noLoc (HsApp f (noLoc a))
-
-mkSimpleHsAlt :: LPat id -> LHsExpr id -> LMatch id
--- A simple lambda with a single pattern, no binds, no guards; pre-typechecking
-mkSimpleHsAlt pat expr 
-  = mkSimpleMatch [pat] expr
 
 -------------------------------
 -- These are the bits of syntax that contain rebindable names
@@ -601,15 +616,21 @@ hsTyClDeclBinders :: Eq name => Located (TyClDecl name) -> [Located name]
 -- occurence.  We use the equality to filter out duplicate field names
 
 hsTyClDeclBinders (L _ (TyFamily    {tcdLName = name})) = [name]
-hsTyClDeclBinders (L _ (TySynonym   {tcdLName = name})) = [name]
 hsTyClDeclBinders (L _ (ForeignType {tcdLName = name})) = [name]
 
 hsTyClDeclBinders (L _ (ClassDecl {tcdLName = cls_name, tcdSigs = sigs, tcdATs = ats}))
   = cls_name : 
     concatMap hsTyClDeclBinders ats ++ [n | L _ (TypeSig ns _) <- sigs, n <- ns]
 
-hsTyClDeclBinders (L _ (TyData {tcdLName = tc_name, tcdCons = cons}))
-  = tc_name : hsConDeclsBinders cons
+hsTyClDeclBinders (L _ (TySynonym   {tcdLName = name, tcdTyPats = mb_pats })) 
+  | isJust mb_pats = []
+  | otherwise      = [name]
+  -- See Note [Binders in family instances]
+
+hsTyClDeclBinders (L _ (TyData {tcdLName = tc_name, tcdCons = cons, tcdTyPats = mb_pats }))
+  | isJust mb_pats = hsConDeclsBinders cons
+  | otherwise      = tc_name : hsConDeclsBinders cons
+  -- See Note [Binders in family instances]
 
 hsConDeclsBinders :: (Eq name) => [LConDecl name] -> [Located name]
   -- See hsTyClDeclBinders for what this does
@@ -627,6 +648,13 @@ hsConDeclsBinders cons
     do_one (flds_seen, acc) (L _ (ConDecl { con_name = lname }))
 	= (flds_seen, lname:acc)
 \end{code}
+
+Note [Binders in family instances]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In a type or data family instance declaration, the type 
+constructor is an *occurrence* not a binding site
+    type instance T Int = Int -> Int   -- No binders
+    data instance S Bool = S1 | S2     -- Binders are S1,S2
 
 
 %************************************************************************

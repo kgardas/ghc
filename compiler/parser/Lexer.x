@@ -80,6 +80,7 @@ import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Ratio
+import Data.Word
 }
 
 $unispace    = \x05 -- Trick Alex into handling Unicode. See alexGetChar.
@@ -1427,17 +1428,13 @@ lex_quasiquote s = do
   case alexGetChar' i of
     Nothing -> lit_error i
 
-    Just ('\\',i)
-        | Just ('|',i) <- next -> do
-                setInput i; lex_quasiquote ('|' : s)
-        | Just (']',i) <- next -> do
-                setInput i; lex_quasiquote (']' : s)
-        where next = alexGetChar' i
-
+    -- NB: The string "|]" terminates the quasiquote,
+    -- with absolutely no escaping. See the extensive
+    -- discussion on Trac #5348 for why there is no
+    -- escape handling.
     Just ('|',i)
-        | Just (']',i) <- next -> do
-                setInput i; return s
-        where next = alexGetChar' i
+        | Just (']',i) <- alexGetChar' i
+        -> do { setInput i; return s }
 
     Just (c, i) -> do
          setInput i; lex_quasiquote (c : s)
@@ -1580,14 +1577,22 @@ data AlexInput = AI RealSrcLoc StringBuffer
 alexInputPrevChar :: AlexInput -> Char
 alexInputPrevChar (AI _ buf) = prevChar buf '\n'
 
+-- backwards compatibility for Alex 2.x
 alexGetChar :: AlexInput -> Maybe (Char,AlexInput)
-alexGetChar (AI loc s)
+alexGetChar inp = case alexGetByte inp of
+                    Nothing    -> Nothing
+                    Just (b,i) -> c `seq` Just (c,i)
+                       where c = chr $ fromIntegral b
+
+alexGetByte :: AlexInput -> Maybe (Word8,AlexInput)
+alexGetByte (AI loc s)
   | atEnd s   = Nothing
-  | otherwise = adj_c `seq` loc' `seq` s' `seq`
+  | otherwise = byte `seq` loc' `seq` s' `seq`
                 --trace (show (ord c)) $
-                Just (adj_c, (AI loc' s'))
+                Just (byte, (AI loc' s'))
   where (c,s') = nextChar s
         loc'   = advanceSrcLoc loc c
+        byte   = fromIntegral $ ord adj_c
 
         non_graphic     = '\x0'
         upper           = '\x1'

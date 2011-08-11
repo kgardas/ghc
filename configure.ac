@@ -403,12 +403,30 @@ then
     fi
 fi
 
+XCODE_VERSION()
+
+SplitObjsBroken=NO
+if test "$TargetOS_CPP" = "darwin"
+then
+    # Split objects is broken (#4013) with XCode < 3.2
+    if test "$XCodeVersion1" -lt 3
+    then
+        SplitObjsBroken=YES
+    else
+        if test "$XCodeVersion1" -eq 3
+        then
+            if test "$XCodeVersion2" -lt 2
+            then
+                SplitObjsBroken=YES
+            fi
+        fi
+    fi
+fi
+AC_SUBST([SplitObjsBroken])
+
 dnl ** Which gcc to use?
 dnl --------------------------------------------------------------
-FP_ARG_WITH_PATH_GNU_PROG([CC], [gcc])
-export CC
-WhatGccIsCalled="$CC"
-AC_SUBST(WhatGccIsCalled)
+FIND_GCC()
 
 dnl ** Which ld to use?
 dnl --------------------------------------------------------------
@@ -421,41 +439,6 @@ dnl --------------------------------------------------------------
 FP_ARG_WITH_PATH_GNU_PROG([NM], [nm])
 NmCmd="$NM"
 AC_SUBST([NmCmd])
-
-SplitObjsBroken=NO
-if test "$TargetOS_CPP" = "darwin"
-then
-    AC_MSG_CHECKING(XCode version)
-    XCodeVersion=`xcodebuild -version | grep Xcode | sed "s/Xcode //"`
-    # Old XCode versions don't actually give the XCode version
-    if test "$XCodeVersion" = ""
-    then
-        AC_MSG_RESULT(not found (too old?))
-        SplitObjsBroken=YES
-    else
-        AC_MSG_RESULT($XCodeVersion)
-        XCodeVersion1=`echo "$XCodeVersion" | sed 's/\..*//'`
-changequote(, )dnl
-        XCodeVersion2=`echo "$XCodeVersion" | sed 's/[^.]*\.\([^.]*\).*/\1/'`
-changequote([, ])dnl
-        AC_MSG_NOTICE(XCode version component 1: $XCodeVersion1)
-        AC_MSG_NOTICE(XCode version component 2: $XCodeVersion2)
-        # Split objects is broken (#4013) with XCode < 3.2
-        if test "$XCodeVersion1" -lt 3
-        then
-            SplitObjsBroken=YES
-        else
-            if test "$XCodeVersion1" -eq 3
-            then
-                if test "$XCodeVersion2" -lt 2
-                then
-                    SplitObjsBroken=YES
-                fi
-            fi
-        fi
-    fi
-fi
-AC_SUBST([SplitObjsBroken])
 
 dnl ** Mac OS X: explicit deployment target
 dnl --------------------------------------------------------------
@@ -625,6 +608,9 @@ dnl ** check for installed alex binary + version
 dnl    (don't do it if we're booting from .hc files though.)
 if test "$BootingFromHc" = "NO"; then
 FPTOOLS_ALEX
+if test "${Alex3}" = "YES"; then
+  AC_MSG_ERROR([GHC does not build with Alex 3 yet; please install an older version (we hope to fix this soon).])
+fi
 fi;
 
 dnl --------------------------------------------------
@@ -908,7 +894,7 @@ AC_SUBST(BUILD_DOCBOOK_PS)
 AC_SUBST(BUILD_DOCBOOK_PDF)
 
 LIBRARY_VERSION(base)
-LIBRARY_VERSION(Cabal)
+LIBRARY_VERSION(Cabal, Cabal/cabal)
 LIBRARY_VERSION(ghc-prim)
 LIBRARY_ghc_VERSION="$ProjectVersion"
 AC_SUBST(LIBRARY_ghc_VERSION)
